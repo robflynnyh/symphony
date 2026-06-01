@@ -119,6 +119,10 @@ Notes:
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
+- Set `codex.issue_label_overrides: true` to let Linear labels override Codex turn settings per
+  issue. Supported labels are `codex:model:<model>` and `codex:thinking:<minimal|low|medium|high|xhigh>`.
+  `codex:effort:<level>` is also accepted as an alias because Codex App Server names the thinking
+  field `effort`.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue

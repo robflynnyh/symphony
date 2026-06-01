@@ -23,7 +23,8 @@ defmodule SymphonyElixir.Config do
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
           thread_sandbox: String.t(),
-          turn_sandbox_policy: map()
+          turn_sandbox_policy: map(),
+          issue_label_overrides: boolean()
         }
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
@@ -108,7 +109,8 @@ defmodule SymphonyElixir.Config do
          %{
            approval_policy: settings.codex.approval_policy,
            thread_sandbox: settings.codex.thread_sandbox,
-           turn_sandbox_policy: turn_sandbox_policy
+           turn_sandbox_policy: turn_sandbox_policy,
+           issue_label_overrides: settings.codex.issue_label_overrides
          }}
       end
     end
