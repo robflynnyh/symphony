@@ -323,6 +323,12 @@ defmodule SymphonyElixir.Codex.AppServer do
          turn_sandbox_policy,
          issue_label_overrides
        ) do
+    label_override_params = IssueLabelOverrides.turn_params(issue, issue_label_overrides)
+
+    if map_size(label_override_params) > 0 do
+      Logger.info("Applying Codex issue label overrides for #{issue_context(issue)} overrides=#{inspect(label_override_params)}")
+    end
+
     turn_params =
       Map.merge(
         %{
@@ -338,7 +344,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           "approvalPolicy" => approval_policy,
           "sandboxPolicy" => turn_sandbox_policy
         },
-        IssueLabelOverrides.turn_params(issue, issue_label_overrides)
+        label_override_params
       )
 
     send_message(port, %{
