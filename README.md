@@ -3,7 +3,8 @@
 > [!NOTE]
 > This fork adds opt-in per-issue Codex routing from Linear labels. When
 > `codex.issue_label_overrides` is enabled, labels such as `codex:model:gpt-5.5-pro`
-> and `codex:thinking:xhigh` are passed to Codex App Server as turn-level overrides.
+> / `model:gpt-5.5-pro` and `codex:thinking:xhigh` / `thinking:xhigh` are passed to
+> Codex App Server as turn-level overrides.
 
 Symphony turns project work into isolated, autonomous implementation runs, allowing teams to manage
 work instead of supervising coding agents.

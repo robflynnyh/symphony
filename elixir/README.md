@@ -120,8 +120,9 @@ Notes:
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
 - Set `codex.issue_label_overrides: true` to let Linear labels override Codex turn settings per
-  issue. Supported labels are `codex:model:<model>` and `codex:thinking:<minimal|low|medium|high|xhigh>`.
-  `codex:effort:<level>` is also accepted as an alias because Codex App Server names the thinking
+  issue. Supported labels are `codex:model:<model>` / `model:<model>` and
+  `codex:thinking:<minimal|low|medium|high|xhigh>` / `thinking:<level>`. `codex:effort:<level>`
+  and `effort:<level>` are also accepted as aliases because Codex App Server names the thinking
   field `effort`.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.

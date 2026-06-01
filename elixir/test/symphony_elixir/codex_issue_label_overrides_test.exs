@@ -24,6 +24,15 @@ defmodule SymphonyElixir.CodexIssueLabelOverridesTest do
     assert IssueLabelOverrides.turn_params(issue, true) == %{"effort" => "high"}
   end
 
+  test "extracts short Linear label forms" do
+    issue = %Issue{labels: ["model:gpt-5.5", "thinking:low"]}
+
+    assert IssueLabelOverrides.turn_params(issue, true) == %{
+             "model" => "gpt-5.5",
+             "effort" => "low"
+           }
+  end
+
   test "ignores invalid override labels" do
     issue = %Issue{labels: ["codex:model:gpt 5", "codex:effort:warp"]}
 

@@ -6,9 +6,9 @@ defmodule SymphonyElixir.Codex.IssueLabelOverrides do
   alias SymphonyElixir.Linear.Issue
 
   @effort_values ~w(minimal low medium high xhigh)
-  @model_prefix "codex:model:"
-  @effort_prefix "codex:effort:"
-  @thinking_prefix "codex:thinking:"
+  @model_prefixes ["codex:model:", "model:"]
+  @effort_prefixes ["codex:effort:", "effort:"]
+  @thinking_prefixes ["codex:thinking:", "thinking:"]
   @model_pattern ~r/^[a-z0-9][a-z0-9._-]*$/
 
   @spec turn_params(Issue.t() | map(), boolean()) :: map()
@@ -37,24 +37,27 @@ defmodule SymphonyElixir.Codex.IssueLabelOverrides do
 
   defp model_from_labels(labels) do
     labels
-    |> Enum.find_value(&label_value(&1, @model_prefix))
+    |> Enum.find_value(&label_value(&1, @model_prefixes))
     |> validate_model()
   end
 
   defp effort_from_labels(labels) do
     labels
     |> Enum.find_value(fn label ->
-      label_value(label, @effort_prefix) || label_value(label, @thinking_prefix)
+      label_value(label, @effort_prefixes) || label_value(label, @thinking_prefixes)
     end)
     |> validate_effort()
   end
 
-  defp label_value(label, prefix) do
-    if String.starts_with?(label, prefix) do
-      label
-      |> String.replace_prefix(prefix, "")
-      |> String.trim()
-    end
+  defp label_value(label, prefixes) do
+    prefixes
+    |> Enum.find_value(fn prefix ->
+      if String.starts_with?(label, prefix) do
+        label
+        |> String.replace_prefix(prefix, "")
+        |> String.trim()
+      end
+    end)
   end
 
   defp validate_model(model) when is_binary(model) do
