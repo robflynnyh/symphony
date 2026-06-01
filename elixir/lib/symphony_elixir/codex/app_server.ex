@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Codex.IssueLabelOverrides, Config, PathSafety, SSH}
 
   @initialize_id 1
   @thread_start_id 2
@@ -20,6 +20,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           auto_approve_requests: boolean(),
           thread_sandbox: String.t(),
           turn_sandbox_policy: map(),
+          issue_label_overrides: boolean(),
           thread_id: String.t(),
           workspace: Path.t(),
           worker_host: String.t() | nil
@@ -54,6 +55,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            auto_approve_requests: session_policies.approval_policy == "never",
            thread_sandbox: session_policies.thread_sandbox,
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
+           issue_label_overrides: session_policies.issue_label_overrides,
            thread_id: thread_id,
            workspace: expanded_workspace,
            worker_host: worker_host
@@ -74,6 +76,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           approval_policy: approval_policy,
           auto_approve_requests: auto_approve_requests,
           turn_sandbox_policy: turn_sandbox_policy,
+          issue_label_overrides: issue_label_overrides,
           thread_id: thread_id,
           workspace: workspace
         },
@@ -88,7 +91,16 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments)
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    case start_turn(
+           port,
+           thread_id,
+           prompt,
+           issue,
+           workspace,
+           approval_policy,
+           turn_sandbox_policy,
+           issue_label_overrides
+         ) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
@@ -301,23 +313,44 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+  defp start_turn(
+         port,
+         thread_id,
+         prompt,
+         issue,
+         workspace,
+         approval_policy,
+         turn_sandbox_policy,
+         issue_label_overrides
+       ) do
+    label_override_params = IssueLabelOverrides.turn_params(issue, issue_label_overrides)
+
+    if map_size(label_override_params) > 0 do
+      Logger.info("Applying Codex issue label overrides for #{issue_context(issue)} overrides=#{inspect(label_override_params)}")
+    end
+
+    turn_params =
+      Map.merge(
+        %{
+          "threadId" => thread_id,
+          "input" => [
+            %{
+              "type" => "text",
+              "text" => prompt
+            }
+          ],
+          "cwd" => workspace,
+          "title" => "#{issue.identifier}: #{issue.title}",
+          "approvalPolicy" => approval_policy,
+          "sandboxPolicy" => turn_sandbox_policy
+        },
+        label_override_params
+      )
+
     send_message(port, %{
       "method" => "turn/start",
       "id" => @turn_start_id,
-      "params" => %{
-        "threadId" => thread_id,
-        "input" => [
-          %{
-            "type" => "text",
-            "text" => prompt
-          }
-        ],
-        "cwd" => workspace,
-        "title" => "#{issue.identifier}: #{issue.title}",
-        "approvalPolicy" => approval_policy,
-        "sandboxPolicy" => turn_sandbox_policy
-      }
+      "params" => turn_params
     })
 
     case await_response(port, @turn_start_id) do

@@ -771,6 +771,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.turn_timeout_ms == 3_600_000
     assert config.codex.read_timeout_ms == 5_000
     assert config.codex.stall_timeout_ms == 300_000
+    refute config.codex.issue_label_overrides
 
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_command: "codex --config 'model=\"gpt-5.5\"' app-server"
@@ -778,6 +779,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Config.settings!().codex.command ==
              "codex --config 'model=\"gpt-5.5\"' app-server"
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_issue_label_overrides: true)
+    assert Config.settings!().codex.issue_label_overrides
 
     explicit_root =
       Path.join(
@@ -842,6 +846,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_retry_backoff_ms: 0,
       max_concurrent_agents_by_state: %{"Todo" => "1", "Review" => 0, "Done" => "bad"},
       hook_timeout_ms: 0,
+      codex_issue_label_overrides: "maybe",
       observability_enabled: "maybe",
       observability_refresh_ms: %{bad: true},
       observability_render_interval_ms: %{bad: true},

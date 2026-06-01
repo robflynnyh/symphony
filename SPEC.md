@@ -594,6 +594,9 @@ not require recognizing or validating extension fields unless that extension is 
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
+- `codex.issue_label_overrides`: boolean, default `false`; when enabled, Linear labels may set
+  Codex turn-level `model` and reasoning `effort` overrides using either `codex:`-prefixed labels
+  or short labels such as `model:gpt-5.5` and `thinking:low`.
 
 ## 7. Orchestration State Machine
 
@@ -933,6 +936,10 @@ Notes:
 - The default command is `codex app-server`.
 - Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
   using fields supported by the targeted Codex app-server version.
+- If `codex.issue_label_overrides` is enabled, per-issue Linear labels may additionally supply
+  turn-level `model` and `effort` fields. The user-facing thinking label maps to Codex App Server's
+  `effort` field. Supported label prefixes are `codex:model:`, `model:`, `codex:thinking:`,
+  `thinking:`, `codex:effort:`, and `effort:`.
 
 RECOMMENDED additional process settings:
 
