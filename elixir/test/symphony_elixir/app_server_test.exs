@@ -183,7 +183,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server passes enabled issue label model and thinking overrides to turn start" do
+  test "app server passes default issue label model and thinking overrides to turn start" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -242,8 +242,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_command: "#{codex_binary} app-server",
-        codex_issue_label_overrides: true
+        codex_command: "#{codex_binary} app-server"
       )
 
       issue = %Issue{

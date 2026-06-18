@@ -174,7 +174,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
-      field(:issue_label_overrides, :boolean, default: false)
+      field(:issue_label_overrides, :boolean, default: true)
+      field(:thread_continuation, :boolean, default: true)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -190,7 +191,8 @@ defmodule SymphonyElixir.Config.Schema do
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms,
-          :issue_label_overrides
+          :issue_label_overrides,
+          :thread_continuation
         ],
         empty_values: []
       )

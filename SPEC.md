@@ -594,9 +594,12 @@ not require recognizing or validating extension fields unless that extension is 
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
-- `codex.issue_label_overrides`: boolean, default `false`; when enabled, Linear labels may set
+- `codex.issue_label_overrides`: boolean, default `true`; when enabled, Linear labels may set
   Codex turn-level `model` and reasoning `effort` overrides using either `codex:`-prefixed labels
   or short labels such as `model:gpt-5.5` and `thinking:low`.
+- `codex.thread_continuation`: boolean, default `true`; when enabled, non-active pause/reactivation
+  flows may resume the last known coding-agent thread. When disabled, reactivation uses the old
+  fresh-thread behavior.
 
 ## 7. Orchestration State Machine
 
@@ -638,6 +641,14 @@ Important nuance:
 - Once the worker exits normally, the orchestrator still schedules a short continuation retry
   (about 1 second) so it can re-check whether the issue remains active and needs another worker
   session.
+- If `codex.thread_continuation` is enabled and a running issue moves to a non-active,
+  non-terminal state, the orchestrator SHOULD stop the live worker while preserving the workspace
+  and last known `thread_id` in memory. If the same issue later becomes active again in the same
+  orchestrator process, the next worker SHOULD resume that thread with reactivation guidance rather
+  than send the original task prompt to a new thread.
+- A per-issue label MAY disable this behavior and force the old fresh-thread approach. The Elixir
+  implementation supports `symphony:disable_thread_continuation` and
+  `symphony:disable-thread-continuation`.
 
 ### 7.2 Run Attempt Lifecycle
 
@@ -936,7 +947,7 @@ Notes:
 - The default command is `codex app-server`.
 - Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
   using fields supported by the targeted Codex app-server version.
-- If `codex.issue_label_overrides` is enabled, per-issue Linear labels may additionally supply
+- Unless `codex.issue_label_overrides` is disabled, per-issue Linear labels may additionally supply
   turn-level `model` and `effort` fields. The user-facing thinking label maps to Codex App Server's
   `effort` field. Supported label prefixes are `codex:model:`, `model:`, `codex:thinking:`,
   `thinking:`, `codex:effort:`, and `effort:`.
@@ -972,6 +983,8 @@ Session identifiers:
 - Extract `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
 - Emit `session_id = "<thread_id>-<turn_id>"`
 - Reuse the same `thread_id` for all continuation turns inside one worker run
+- Reuse the last known `thread_id` for non-active pause/reactivation flows when enabled by config
+  and labels, and when the targeted protocol supports thread resume.
 
 ### 10.3 Streaming Turn Processing
 
@@ -1602,7 +1615,9 @@ Operators can control behavior by:
   Section 6.2.
 - Changing issue states in the tracker:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
-  - non-active state -> running session is stopped without cleanup
+  - non-active state -> running session is stopped without cleanup; when
+    `codex.thread_continuation` is enabled and the issue is not labeled to disable it, the last
+    known thread id is kept in memory for later reactivation
 - Restarting the service for process recovery or deployment (not as the normal path for applying
   workflow config changes).
 

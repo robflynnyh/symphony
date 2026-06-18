@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Codex.IssueLabelOverrides do
   @moduledoc """
-  Converts opt-in Linear labels into Codex turn-level runtime overrides.
+  Converts enabled Linear labels into Codex turn-level runtime overrides.
   """
 
   alias SymphonyElixir.Linear.Issue

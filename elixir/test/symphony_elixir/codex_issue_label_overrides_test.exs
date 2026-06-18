@@ -3,7 +3,7 @@ defmodule SymphonyElixir.CodexIssueLabelOverridesTest do
 
   alias SymphonyElixir.Codex.IssueLabelOverrides
 
-  test "label overrides are opt in" do
+  test "label overrides can be disabled" do
     issue = %Issue{labels: ["codex:model:gpt-5.5-pro", "codex:thinking:xhigh"]}
 
     assert IssueLabelOverrides.turn_params(issue, false) == %{}
@@ -37,5 +37,19 @@ defmodule SymphonyElixir.CodexIssueLabelOverridesTest do
     issue = %Issue{labels: ["codex:model:gpt 5", "codex:effort:warp"]}
 
     assert IssueLabelOverrides.turn_params(issue, true) == %{}
+  end
+
+  test "extracts labels from map-shaped issues" do
+    issue = %{labels: ["codex:model:gpt-5.5-pro", "effort:minimal"]}
+
+    assert IssueLabelOverrides.turn_params(issue, true) == %{
+             "model" => "gpt-5.5-pro",
+             "effort" => "minimal"
+           }
+  end
+
+  test "ignores missing and malformed labels" do
+    assert IssueLabelOverrides.turn_params(%{labels: "codex:model:gpt-5.5-pro"}, true) == %{}
+    assert IssueLabelOverrides.turn_params(%{}, true) == %{}
   end
 end
