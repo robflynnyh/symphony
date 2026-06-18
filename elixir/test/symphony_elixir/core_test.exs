@@ -889,6 +889,19 @@ defmodule SymphonyElixir.CoreTest do
   test "normal worker exit schedules active-state continuation retry" do
     issue_id = "issue-resume"
     ref = make_ref()
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: issue_id,
+        identifier: "MT-558",
+        state: "In Progress",
+        title: "Continue active work",
+        labels: []
+      }
+    ])
+
     orchestrator_name = Module.concat(__MODULE__, :ContinuationOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -928,6 +941,61 @@ defmodule SymphonyElixir.CoreTest do
     refute Map.has_key?(retry_entry, :thread_id)
     assert is_integer(due_at_ms)
     assert_due_in_range(due_at_ms, 500, 1_100)
+  end
+
+  test "normal worker exit after issue leaves active states preserves paused thread" do
+    issue_id = "issue-normal-paused"
+    ref = make_ref()
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [
+      %Issue{
+        id: issue_id,
+        identifier: "MT-PAUSED-NORMAL",
+        state: "In Review",
+        title: "Pause after completion",
+        labels: []
+      }
+    ])
+
+    orchestrator_name = Module.concat(__MODULE__, :NormalPausedOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-PAUSED-NORMAL",
+      issue: %Issue{id: issue_id, identifier: "MT-PAUSED-NORMAL", state: "In Progress"},
+      thread_id: "thread-paused-after-normal-exit",
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.completed, issue_id)
+    assert MapSet.member?(state.paused_issue_ids, issue_id)
+    assert state.paused_thread_ids[issue_id] == "thread-paused-after-normal-exit"
   end
 
   test "abnormal worker exit increments retry attempt progressively" do

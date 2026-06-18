@@ -207,17 +207,7 @@ defmodule SymphonyElixir.Orchestrator do
     if input_required_blocker?(running_entry) do
       block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
     else
-      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
-
-      state
-      |> complete_issue(issue_id)
-      |> schedule_issue_retry(issue_id, 1, %{
-        identifier: running_entry.identifier,
-        issue_url: running_entry.issue.url,
-        delay_type: :continuation,
-        worker_host: Map.get(running_entry, :worker_host),
-        workspace_path: Map.get(running_entry, :workspace_path)
-      })
+      handle_normal_agent_completion(state, issue_id, running_entry, session_id)
     end
   end
 
@@ -1127,6 +1117,62 @@ defmodule SymphonyElixir.Orchestrator do
       | completed: MapSet.put(state.completed, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
+  end
+
+  defp handle_normal_agent_completion(%State{} = state, issue_id, running_entry, session_id) do
+    case Tracker.fetch_issue_states_by_ids([issue_id]) do
+      {:ok, [%Issue{} = issue | _]} ->
+        handle_normal_agent_completion_for_issue(state, issue, issue_id, running_entry, session_id)
+
+      {:ok, []} ->
+        Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}, but issue is no longer visible; releasing claim")
+        release_issue_claim(state, issue_id)
+
+      {:error, reason} ->
+        Logger.warning("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}, but issue refresh failed: #{inspect(reason)}; scheduling active-state continuation check")
+        schedule_normal_completion_retry(state, issue_id, running_entry)
+    end
+  end
+
+  defp handle_normal_agent_completion_for_issue(%State{} = state, %Issue{} = issue, issue_id, running_entry, session_id) do
+    terminal_states = terminal_state_set()
+
+    cond do
+      terminal_issue_state?(issue.state, terminal_states) ->
+        Logger.info("Agent task completed for #{issue_context(issue)} session_id=#{session_id}; issue is terminal, cleaning workspace")
+
+        cleanup_issue_workspace(issue.identifier, Map.get(running_entry, :worker_host))
+        release_issue_claim(state, issue_id, forget_paused: true)
+
+      !issue_routable?(issue) ->
+        Logger.info("Agent task completed for #{issue_context(issue)} session_id=#{session_id}; issue is no longer routed to this worker, releasing claim")
+
+        release_issue_claim(state, issue_id, forget_paused: true)
+
+      retry_candidate_issue?(issue, terminal_states) ->
+        Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+        schedule_normal_completion_retry(state, issue_id, %{running_entry | issue: issue})
+
+      true ->
+        Logger.info("Agent task completed for #{issue_context(issue)} session_id=#{session_id}; issue is non-active, preserving paused state")
+
+        state
+        |> maybe_remember_paused_state(issue_id, running_entry, true, thread_continuation_enabled?(issue))
+        |> release_issue_claim(issue_id)
+    end
+  end
+
+  defp schedule_normal_completion_retry(%State{} = state, issue_id, running_entry) do
+    state
+    |> complete_issue(issue_id)
+    |> schedule_issue_retry(issue_id, 1, %{
+      identifier: running_entry.identifier,
+      issue_url: running_entry.issue.url,
+      delay_type: :continuation,
+      worker_host: Map.get(running_entry, :worker_host),
+      workspace_path: Map.get(running_entry, :workspace_path)
+    })
   end
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
