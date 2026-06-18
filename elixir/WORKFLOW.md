@@ -2,6 +2,7 @@
 tracker:
   kind: linear
   project_slug: "symphony-0c79b11b75ea"
+  required_labels: []
   active_states:
     - Todo
     - In Progress
@@ -35,6 +36,7 @@ codex:
   issue_label_overrides: true
   turn_sandbox_policy:
     type: workspaceWrite
+    networkAccess: true
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

@@ -124,6 +124,9 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 Notes:
 
 - If a value is missing, defaults are used.
+- `tracker.required_labels` is optional. When set, an issue must have every
+  configured label to dispatch or continue running. Label matching ignores
+  case and surrounding whitespace. A blank configured label matches no issue.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
@@ -141,6 +144,9 @@ Notes:
   field `effort`.
 - `codex.thread_continuation` defaults to `true`. Set it to `false` to avoid resuming Codex
   threads when issues return from non-active states such as `Backlog` or `In Review`.
+- Workflows that run package managers or other commands that resolve external hosts should set
+  `networkAccess: true` in `codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
+  by the Codex turn sandbox.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
@@ -181,6 +187,7 @@ The observability UI now runs on a minimal Phoenix stack:
 - JSON API for operational debugging under `/api/v1/*`
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
+- Tracker issue identifiers link to the tracker-provided URL when it uses `http` or `https`
 
 ## Project Layout
 
