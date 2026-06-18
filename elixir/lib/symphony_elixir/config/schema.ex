@@ -50,6 +50,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:api_key, :string)
       field(:project_slug, :string)
       field(:assignee, :string)
+      field(:required_labels, {:array, :string}, default: [])
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
     end
@@ -59,9 +60,14 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [:kind, :endpoint, :api_key, :project_slug, :assignee, :required_labels, :active_states, :terminal_states],
         empty_values: []
       )
+      |> update_change(:required_labels, fn labels ->
+        labels
+        |> Enum.map(&(String.trim(&1) |> String.downcase()))
+        |> Enum.uniq()
+      end)
     end
   end
 
@@ -174,7 +180,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
-      field(:issue_label_overrides, :boolean, default: false)
+      field(:issue_label_overrides, :boolean, default: true)
+      field(:thread_continuation, :boolean, default: true)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -190,7 +197,8 @@ defmodule SymphonyElixir.Config.Schema do
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms,
-          :issue_label_overrides
+          :issue_label_overrides,
+          :thread_continuation
         ],
         empty_values: []
       )

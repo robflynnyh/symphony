@@ -358,6 +358,11 @@ Fields:
   - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
 - `project_slug` (string)
   - REQUIRED for dispatch when `tracker.kind == "linear"`.
+- `required_labels` (list of strings)
+  - Default: `[]`.
+  - An issue MUST contain every configured label to dispatch or continue.
+  - Matching ignores case and surrounding whitespace.
+  - A blank configured label matches no issue.
 - `active_states` (list of strings)
   - Default: `Todo`, `In Progress`
 - `terminal_states` (list of strings)
@@ -574,6 +579,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
+- `tracker.required_labels`: list of strings, default `[]`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
@@ -594,9 +600,12 @@ not require recognizing or validating extension fields unless that extension is 
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
-- `codex.issue_label_overrides`: boolean, default `false`; when enabled, Linear labels may set
+- `codex.issue_label_overrides`: boolean, default `true`; when enabled, Linear labels may set
   Codex turn-level `model` and reasoning `effort` overrides using either `codex:`-prefixed labels
   or short labels such as `model:gpt-5.5` and `thinking:low`.
+- `codex.thread_continuation`: boolean, default `true`; when enabled, non-active pause/reactivation
+  flows may resume the last known coding-agent thread. When disabled, reactivation uses the old
+  fresh-thread behavior.
 
 ## 7. Orchestration State Machine
 
@@ -638,6 +647,14 @@ Important nuance:
 - Once the worker exits normally, the orchestrator still schedules a short continuation retry
   (about 1 second) so it can re-check whether the issue remains active and needs another worker
   session.
+- If `codex.thread_continuation` is enabled and a running issue moves to a non-active,
+  non-terminal state, the orchestrator SHOULD stop the live worker while preserving the workspace
+  and last known `thread_id` in memory. If the same issue later becomes active again in the same
+  orchestrator process, the next worker SHOULD resume that thread with reactivation guidance rather
+  than send the original task prompt to a new thread.
+- A per-issue label MAY disable this behavior and force the old fresh-thread approach. The Elixir
+  implementation supports `symphony:disable_thread_continuation` and
+  `symphony:disable-thread-continuation`.
 
 ### 7.2 Run Attempt Lifecycle
 
@@ -723,6 +740,8 @@ An issue is dispatch-eligible only if all are true:
 
 - It has `id`, `identifier`, `title`, and `state`.
 - Its state is in `active_states` and not in `terminal_states`.
+- It is routed to this worker by the configured assignee and contains every
+  label in `tracker.required_labels`.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
@@ -936,7 +955,7 @@ Notes:
 - The default command is `codex app-server`.
 - Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
   using fields supported by the targeted Codex app-server version.
-- If `codex.issue_label_overrides` is enabled, per-issue Linear labels may additionally supply
+- Unless `codex.issue_label_overrides` is disabled, per-issue Linear labels may additionally supply
   turn-level `model` and `effort` fields. The user-facing thinking label maps to Codex App Server's
   `effort` field. Supported label prefixes are `codex:model:`, `model:`, `codex:thinking:`,
   `thinking:`, `codex:effort:`, and `effort:`.
@@ -972,6 +991,8 @@ Session identifiers:
 - Extract `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
 - Emit `session_id = "<thread_id>-<turn_id>"`
 - Reuse the same `thread_id` for all continuation turns inside one worker run
+- Reuse the last known `thread_id` for non-active pause/reactivation flows when enabled by config
+  and labels, and when the targeted protocol supports thread resume.
 
 ### 10.3 Streaming Turn Processing
 
@@ -1161,6 +1182,9 @@ Linear-specific requirements for `tracker.kind == "linear"`:
 - Auth token sent in `Authorization` header
 - `tracker.project_slug` maps to Linear project `slugId`
 - Candidate issue query filters project using `project: { slugId: { eq: $projectSlug } }`
+- Candidate and issue-state refresh queries include issue labels. Required
+  label filtering happens after normalization so refresh can observe label
+  removal and stop or release existing work.
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
 - Pagination REQUIRED for candidate issues
 - Page size default: `50`
@@ -1179,6 +1203,8 @@ domain model in Section 4.
 Candidate issue normalization SHOULD produce fields listed in Section 4.1.1.
 
 Additional normalization details:
+
+- Label names are trimmed and lowercased.
 
 - `labels` -> lowercase strings
 - `blocked_by` -> derived from inverse relations where relation type is `blocks`
@@ -1288,6 +1314,7 @@ SHOULD return:
 - `running` (list of running session rows)
 - each running row SHOULD include `turn_count`
 - `retrying` (list of retry queue rows)
+- session and retry rows SHOULD include the tracker-provided issue URL when available
 - `codex_totals`
   - `input_tokens`
   - `output_tokens`
@@ -1407,6 +1434,7 @@ Minimum endpoints:
         {
           "issue_id": "abc123",
           "issue_identifier": "MT-649",
+          "issue_url": "https://tracker.example/issues/MT-649",
           "state": "In Progress",
           "session_id": "thread-1-turn-1",
           "turn_count": 7,
@@ -1425,6 +1453,7 @@ Minimum endpoints:
         {
           "issue_id": "def456",
           "issue_identifier": "MT-650",
+          "issue_url": "https://tracker.example/issues/MT-650",
           "attempt": 3,
           "due_at": "2026-02-24T20:16:00Z",
           "error": "no available orchestrator slots"
@@ -1602,7 +1631,9 @@ Operators can control behavior by:
   Section 6.2.
 - Changing issue states in the tracker:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
-  - non-active state -> running session is stopped without cleanup
+  - non-active state -> running session is stopped without cleanup; when
+    `codex.thread_continuation` is enabled and the issue is not labeled to disable it, the last
+    known thread id is kept in memory for later reactivation
 - Restarting the service for process recovery or deployment (not as the normal path for applying
   workflow config changes).
 

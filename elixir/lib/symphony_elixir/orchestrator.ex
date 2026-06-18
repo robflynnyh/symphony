@@ -12,6 +12,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @disable_thread_continuation_labels MapSet.new([
+                                        "symphony:disable_thread_continuation",
+                                        "symphony:disable-thread-continuation"
+                                      ])
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
@@ -37,6 +41,8 @@ defmodule SymphonyElixir.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       blocked: %{},
+      paused_issue_ids: MapSet.new(),
+      paused_thread_ids: %{},
       retry_attempts: %{},
       codex_totals: nil,
       codex_rate_limits: nil
@@ -207,6 +213,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> complete_issue(issue_id)
       |> schedule_issue_retry(issue_id, 1, %{
         identifier: running_entry.identifier,
+        issue_url: running_entry.issue.url,
         delay_type: :continuation,
         worker_host: Map.get(running_entry, :worker_host),
         workspace_path: Map.get(running_entry, :workspace_path)
@@ -237,6 +244,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     schedule_issue_retry(state, issue_id, next_attempt, %{
       identifier: running_entry.identifier,
+      issue_url: running_entry.issue.url,
       error: "agent exited: #{inspect(reason)}",
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path)
@@ -248,6 +256,7 @@ defmodule SymphonyElixir.Orchestrator do
       state
       |> reconcile_running_issues()
       |> reconcile_blocked_issues()
+      |> reconcile_paused_issues()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
@@ -346,6 +355,26 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp reconcile_paused_issues(%State{} = state) do
+    paused_ids = paused_issue_ids(state)
+
+    if paused_ids == [] do
+      state
+    else
+      case Tracker.fetch_issue_states_by_ids(paused_ids) do
+        {:ok, issues} ->
+          issues
+          |> reconcile_paused_issue_states(state, terminal_state_set())
+          |> reconcile_missing_paused_issue_ids(paused_ids, issues)
+
+        {:error, reason} ->
+          Logger.debug("Failed to refresh paused issue states: #{inspect(reason)}; keeping paused issue ids")
+
+          state
+      end
+    end
+  end
+
   @doc false
   @spec reconcile_issue_states_for_test([Issue.t()], term()) :: term()
   def reconcile_issue_states_for_test(issues, %State{} = state) when is_list(issues) do
@@ -354,6 +383,27 @@ defmodule SymphonyElixir.Orchestrator do
 
   def reconcile_issue_states_for_test(issues, state) when is_list(issues) do
     reconcile_running_issue_states(issues, state, active_state_set(), terminal_state_set())
+  end
+
+  @doc false
+  @spec reconcile_paused_issue_states_for_test([Issue.t()], term()) :: term()
+  def reconcile_paused_issue_states_for_test(issues, %State{} = state) when is_list(issues) do
+    reconcile_paused_issue_states(issues, state, terminal_state_set())
+  end
+
+  @doc false
+  @spec reconcile_blocked_issue_states_for_test([Issue.t()], term()) :: term()
+  def reconcile_blocked_issue_states_for_test(issues, %State{} = state) when is_list(issues) do
+    reconcile_blocked_issue_states(issues, state, active_state_set(), terminal_state_set())
+  end
+
+  @doc false
+  @spec handle_retry_issue_lookup_for_test(Issue.t(), term(), String.t(), non_neg_integer(), map()) ::
+          term()
+  def handle_retry_issue_lookup_for_test(%Issue{} = issue, %State{} = state, issue_id, attempt, metadata)
+      when is_binary(issue_id) and is_integer(attempt) and attempt >= 0 and is_map(metadata) do
+    {:noreply, updated_state} = handle_retry_issue_lookup(issue, state, issue_id, attempt, metadata)
+    updated_state
   end
 
   @doc false
@@ -382,6 +432,12 @@ defmodule SymphonyElixir.Orchestrator do
     select_worker_host(state, preferred_worker_host)
   end
 
+  @doc false
+  @spec resume_thread_context_for_test(term(), Issue.t()) :: {String.t() | nil, atom() | nil}
+  def resume_thread_context_for_test(%State{} = state, %Issue{} = issue) do
+    resume_thread_context_for_issue(state, issue, nil, nil)
+  end
+
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
 
   defp reconcile_running_issue_states([issue | rest], state, active_states, terminal_states) do
@@ -400,10 +456,10 @@ defmodule SymphonyElixir.Orchestrator do
 
         terminate_running_issue(state, issue.id, true)
 
-      !issue_routable_to_worker?(issue) ->
+      !issue_routable?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, preserve_thread: false)
 
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
@@ -411,7 +467,10 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false,
+          remember_paused: true,
+          preserve_thread: thread_continuation_enabled?(issue)
+        )
     end
   end
 
@@ -435,7 +494,7 @@ defmodule SymphonyElixir.Orchestrator do
         cleanup_issue_workspace(issue.identifier, blocked_issue_worker_host(state, issue.id))
         release_issue_claim(state, issue.id)
 
-      !issue_routable_to_worker?(issue) ->
+      !issue_routable?(issue) ->
         Logger.info("Blocked issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; releasing block")
         release_issue_claim(state, issue.id)
 
@@ -449,6 +508,29 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_blocked_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp reconcile_paused_issue_states([], state, _terminal_states), do: state
+
+  defp reconcile_paused_issue_states([issue | rest], state, terminal_states) do
+    reconcile_paused_issue_states(
+      rest,
+      reconcile_paused_issue_state(issue, state, terminal_states),
+      terminal_states
+    )
+  end
+
+  defp reconcile_paused_issue_state(%Issue{} = issue, %State{} = state, terminal_states) do
+    if terminal_issue_state?(issue.state, terminal_states) do
+      Logger.info("Paused issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; cleaning workspace and forgetting paused thread")
+
+      cleanup_issue_workspace(issue.identifier)
+      release_issue_claim(state, issue.id, forget_paused: true)
+    else
+      state
+    end
+  end
+
+  defp reconcile_paused_issue_state(_issue, state, _terminal_states), do: state
 
   defp reconcile_missing_running_issue_ids(%State{} = state, requested_issue_ids, issues)
        when is_list(requested_issue_ids) and is_list(issues) do
@@ -494,6 +576,28 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_missing_blocked_issue_ids(state, _requested_issue_ids, _issues), do: state
 
+  defp reconcile_missing_paused_issue_ids(%State{} = state, requested_issue_ids, issues)
+       when is_list(requested_issue_ids) and is_list(issues) do
+    visible_issue_ids =
+      issues
+      |> Enum.flat_map(fn
+        %Issue{id: issue_id} when is_binary(issue_id) -> [issue_id]
+        _ -> []
+      end)
+      |> MapSet.new()
+
+    Enum.reduce(requested_issue_ids, state, fn issue_id, state_acc ->
+      if MapSet.member?(visible_issue_ids, issue_id) do
+        state_acc
+      else
+        Logger.info("Paused issue no longer visible during state refresh: issue_id=#{issue_id}; forgetting paused state")
+        release_issue_claim(state_acc, issue_id, forget_paused: true)
+      end
+    end)
+  end
+
+  defp reconcile_missing_paused_issue_ids(state, _requested_issue_ids, _issues), do: state
+
   defp log_missing_running_issue(%State{} = state, issue_id) when is_binary(issue_id) do
     case Map.get(state.running, issue_id) do
       %{identifier: identifier} ->
@@ -526,7 +630,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
+  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace, opts \\ []) do
     case Map.get(state.running, issue_id) do
       nil ->
         release_issue_claim(state, issue_id)
@@ -534,18 +638,23 @@ defmodule SymphonyElixir.Orchestrator do
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
         worker_host = Map.get(running_entry, :worker_host)
+        remember_paused? = Keyword.get(opts, :remember_paused, false)
+        preserve_thread? = Keyword.get(opts, :preserve_thread, false)
 
         if cleanup_workspace do
           cleanup_issue_workspace(identifier, worker_host)
         end
 
         stop_running_task(pid, ref)
+        state = maybe_remember_paused_state(state, issue_id, running_entry, remember_paused?, preserve_thread?)
 
         %{
           state
           | running: Map.delete(state.running, issue_id),
             claimed: MapSet.delete(state.claimed, issue_id),
             blocked: Map.delete(state.blocked, issue_id),
+            paused_issue_ids: maybe_forget_paused_issue(state.paused_issue_ids, issue_id, cleanup_workspace),
+            paused_thread_ids: maybe_forget_paused_thread(state.paused_thread_ids, issue_id, cleanup_workspace),
             retry_attempts: Map.delete(state.retry_attempts, issue_id)
         }
 
@@ -602,9 +711,10 @@ defmodule SymphonyElixir.Orchestrator do
         next_attempt = next_retry_attempt_from_running(running_entry)
 
         state
-        |> terminate_running_issue(issue_id, false)
+        |> terminate_running_issue(issue_id, false, preserve_thread: false)
         |> schedule_issue_retry(issue_id, next_attempt, %{
           identifier: identifier,
+          issue_url: running_entry.issue.url,
           error: "stalled for #{elapsed_ms}ms without codex activity"
         })
       end
@@ -832,18 +942,16 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        )
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
-    issue_routable_to_worker?(issue) and
+    issue_routable?(issue) and
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states)
   end
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
 
-  defp issue_routable_to_worker?(%Issue{assigned_to_worker: assigned_to_worker})
-       when is_boolean(assigned_to_worker),
-       do: assigned_to_worker
-
-  defp issue_routable_to_worker?(_issue), do: true
+  defp issue_routable?(%Issue{} = issue) do
+    Issue.routable?(issue, Config.settings!().tracker.required_labels)
+  end
 
   defp todo_issue_blocked_by_non_terminal?(
          %Issue{state: issue_state, blocked_by: blockers},
@@ -890,10 +998,17 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.new()
   end
 
-  defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
+  defp dispatch_issue(
+         %State{} = state,
+         issue,
+         attempt \\ nil,
+         preferred_worker_host \\ nil,
+         thread_id \\ nil,
+         resume_kind \\ nil
+       ) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, thread_id, resume_kind)
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
@@ -910,7 +1025,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host, thread_id, resume_kind) do
     recipient = self()
 
     case select_worker_host(state, preferred_worker_host) do
@@ -919,13 +1034,20 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, thread_id, resume_kind)
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, thread_id, resume_kind) do
+    {thread_id, resume_kind} = resume_thread_context_for_issue(state, issue, thread_id, resume_kind)
+
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             thread_id: thread_id,
+             resume_kind: resume_kind
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -941,6 +1063,7 @@ defmodule SymphonyElixir.Orchestrator do
             worker_host: worker_host,
             workspace_path: nil,
             session_id: nil,
+            thread_id: thread_id,
             last_codex_message: nil,
             last_codex_timestamp: nil,
             last_codex_event: nil,
@@ -960,6 +1083,8 @@ defmodule SymphonyElixir.Orchestrator do
           state
           | running: running,
             claimed: MapSet.put(state.claimed, issue.id),
+            paused_issue_ids: MapSet.delete(state.paused_issue_ids, issue.id),
+            paused_thread_ids: Map.delete(state.paused_thread_ids, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id)
         }
 
@@ -969,6 +1094,7 @@ defmodule SymphonyElixir.Orchestrator do
 
         schedule_issue_retry(state, issue.id, next_attempt, %{
           identifier: issue.identifier,
+          issue_url: issue.url,
           error: "failed to spawn agent: #{inspect(reason)}",
           worker_host: worker_host
         })
@@ -1012,9 +1138,12 @@ defmodule SymphonyElixir.Orchestrator do
     retry_token = make_ref()
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
     identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
+    issue_url = pick_retry_issue_url(previous_retry, metadata)
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
+    thread_id = pick_retry_thread_id(previous_retry, metadata)
+    resume_kind = pick_retry_resume_kind(previous_retry, metadata)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -1026,19 +1155,24 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
 
+    retry_entry =
+      %{
+        attempt: next_attempt,
+        timer_ref: timer_ref,
+        retry_token: retry_token,
+        due_at_ms: due_at_ms,
+        identifier: identifier,
+        issue_url: issue_url,
+        error: error,
+        worker_host: worker_host,
+        workspace_path: workspace_path
+      }
+      |> maybe_put_retry_value(:thread_id, thread_id)
+      |> maybe_put_retry_value(:resume_kind, resume_kind)
+
     %{
       state
-      | retry_attempts:
-          Map.put(state.retry_attempts, issue_id, %{
-            attempt: next_attempt,
-            timer_ref: timer_ref,
-            retry_token: retry_token,
-            due_at_ms: due_at_ms,
-            identifier: identifier,
-            error: error,
-            worker_host: worker_host,
-            workspace_path: workspace_path
-          })
+      | retry_attempts: Map.put(state.retry_attempts, issue_id, retry_entry)
     }
   end
 
@@ -1047,9 +1181,12 @@ defmodule SymphonyElixir.Orchestrator do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
+          issue_url: Map.get(retry_entry, :issue_url),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
-          workspace_path: Map.get(retry_entry, :workspace_path)
+          workspace_path: Map.get(retry_entry, :workspace_path),
+          thread_id: Map.get(retry_entry, :thread_id),
+          resume_kind: Map.get(retry_entry, :resume_kind)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -1087,7 +1224,7 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
         cleanup_issue_workspace(issue.identifier, metadata[:worker_host])
-        {:noreply, release_issue_claim(state, issue_id)}
+        {:noreply, release_issue_claim(state, issue_id, forget_paused: true)}
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, issue, attempt, metadata)
@@ -1095,7 +1232,7 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
 
-        {:noreply, release_issue_claim(state, issue_id)}
+        {:noreply, release_issue_claim(state, issue_id, thread_id: metadata[:thread_id])}
     end
   end
 
@@ -1143,7 +1280,15 @@ defmodule SymphonyElixir.Orchestrator do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(state, metadata[:worker_host]) do
-      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
+      {:noreply,
+       dispatch_issue(
+         state,
+         issue,
+         attempt,
+         metadata[:worker_host],
+         metadata[:thread_id],
+         metadata[:resume_kind]
+       )}
     else
       Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
 
@@ -1160,11 +1305,26 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp release_issue_claim(%State{} = state, issue_id) do
+  defp release_issue_claim(%State{} = state, issue_id, opts \\ []) do
+    state =
+      maybe_remember_paused_state(
+        state,
+        issue_id,
+        %{thread_id: opts[:thread_id]},
+        is_binary(opts[:thread_id]),
+        is_binary(opts[:thread_id])
+      )
+
+    forget_paused? = opts[:forget_paused] == true || opts[:forget_thread] == true
+    paused_issue_ids = maybe_forget_paused_issue(state.paused_issue_ids, issue_id, forget_paused?)
+    paused_thread_ids = maybe_forget_paused_thread(state.paused_thread_ids, issue_id, forget_paused?)
+
     %{
       state
       | claimed: MapSet.delete(state.claimed, issue_id),
         blocked: Map.delete(state.blocked, issue_id),
+        paused_issue_ids: paused_issue_ids,
+        paused_thread_ids: paused_thread_ids,
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
   end
@@ -1196,6 +1356,10 @@ defmodule SymphonyElixir.Orchestrator do
     metadata[:identifier] || Map.get(previous_retry, :identifier) || issue_id
   end
 
+  defp pick_retry_issue_url(previous_retry, metadata) do
+    metadata[:issue_url] || Map.get(previous_retry, :issue_url)
+  end
+
   defp pick_retry_error(previous_retry, metadata) do
     metadata[:error] || Map.get(previous_retry, :error)
   end
@@ -1207,6 +1371,17 @@ defmodule SymphonyElixir.Orchestrator do
   defp pick_retry_workspace_path(previous_retry, metadata) do
     metadata[:workspace_path] || Map.get(previous_retry, :workspace_path)
   end
+
+  defp pick_retry_thread_id(previous_retry, metadata) do
+    metadata[:thread_id] || Map.get(previous_retry, :thread_id)
+  end
+
+  defp pick_retry_resume_kind(previous_retry, metadata) do
+    metadata[:resume_kind] || Map.get(previous_retry, :resume_kind)
+  end
+
+  defp maybe_put_retry_value(retry_entry, _key, nil), do: retry_entry
+  defp maybe_put_retry_value(retry_entry, key, value), do: Map.put(retry_entry, key, value)
 
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
 
@@ -1353,6 +1528,7 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           issue_id: issue_id,
           identifier: metadata.identifier,
+          issue_url: metadata.issue.url,
           state: metadata.issue.state,
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
@@ -1378,6 +1554,7 @@ defmodule SymphonyElixir.Orchestrator do
           attempt: attempt,
           due_in_ms: max(0, due_at_ms - now_ms),
           identifier: Map.get(retry, :identifier),
+          issue_url: Map.get(retry, :issue_url),
           error: Map.get(retry, :error),
           worker_host: Map.get(retry, :worker_host),
           workspace_path: Map.get(retry, :workspace_path)
@@ -1390,6 +1567,7 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           issue_id: issue_id,
           identifier: Map.get(metadata, :identifier),
+          issue_url: blocked_issue_url(metadata),
           state: blocked_issue_state(metadata),
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
@@ -1435,6 +1613,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp blocked_issue_state(%{issue: %Issue{state: state}}), do: state
   defp blocked_issue_state(_metadata), do: nil
 
+  defp blocked_issue_url(%{issue: %Issue{url: url}}), do: url
+  defp blocked_issue_url(_metadata), do: nil
+
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_token_delta(running_entry, update)
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
@@ -1451,6 +1632,7 @@ defmodule SymphonyElixir.Orchestrator do
         last_codex_timestamp: timestamp,
         last_codex_message: summarize_codex_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
+        thread_id: thread_id_for_update(Map.get(running_entry, :thread_id), update),
         last_codex_event: event,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
@@ -1482,6 +1664,11 @@ defmodule SymphonyElixir.Orchestrator do
     do: session_id
 
   defp session_id_for_update(existing, _update), do: existing
+
+  defp thread_id_for_update(_existing, %{thread_id: thread_id}) when is_binary(thread_id),
+    do: thread_id
+
+  defp thread_id_for_update(existing, _update), do: existing
 
   defp turn_count_for_update(existing_count, existing_session_id, %{
          event: :session_started,
@@ -1538,6 +1725,94 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp pop_running_entry(state, issue_id) do
     {Map.get(state.running, issue_id), %{state | running: Map.delete(state.running, issue_id)}}
+  end
+
+  defp resume_thread_context_for_issue(_state, %Issue{} = issue, thread_id, resume_kind)
+       when is_binary(thread_id) and byte_size(thread_id) > 0 do
+    if thread_continuation_enabled?(issue), do: {thread_id, resume_kind}, else: {nil, nil}
+  end
+
+  defp resume_thread_context_for_issue(%State{} = state, %Issue{} = issue, _thread_id, _resume_kind) do
+    if thread_continuation_enabled?(issue) do
+      resume_thread_context_for_paused_issue(state, issue)
+    else
+      {nil, nil}
+    end
+  end
+
+  defp resume_thread_context_for_paused_issue(%State{} = state, %Issue{id: issue_id}) do
+    case Map.get(state.paused_thread_ids, issue_id) do
+      thread_id when is_binary(thread_id) and byte_size(thread_id) > 0 -> {thread_id, :reactivation}
+      _ -> {nil, nil}
+    end
+  end
+
+  defp thread_continuation_enabled?(issue) do
+    Config.settings!().codex.thread_continuation && !thread_continuation_disabled_by_label?(issue)
+  end
+
+  defp thread_continuation_disabled_by_label?(%Issue{labels: labels}) do
+    labels
+    |> normalize_issue_labels()
+    |> Enum.any?(&MapSet.member?(@disable_thread_continuation_labels, &1))
+  end
+
+  defp thread_continuation_disabled_by_label?(_issue), do: false
+
+  defp normalize_issue_labels(labels) when is_list(labels) do
+    labels
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.downcase(String.trim(&1)))
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp normalize_issue_labels(_labels), do: []
+
+  defp paused_issue_ids(%State{} = state) do
+    state.paused_issue_ids
+    |> MapSet.union(Map.keys(state.paused_thread_ids) |> MapSet.new())
+    |> MapSet.to_list()
+  end
+
+  defp maybe_remember_paused_state(%State{} = state, issue_id, running_entry, true, preserve_thread?)
+       when is_binary(issue_id) and is_map(running_entry) do
+    state = remember_paused_issue(state, issue_id)
+    maybe_remember_paused_thread(state, issue_id, running_entry, preserve_thread?)
+  end
+
+  defp maybe_remember_paused_state(%State{} = state, _issue_id, _running_entry, _remember_paused, _preserve_thread), do: state
+
+  defp maybe_remember_paused_thread(%State{} = state, issue_id, running_entry, true)
+       when is_binary(issue_id) and is_map(running_entry) do
+    case Map.get(running_entry, :thread_id) do
+      thread_id when is_binary(thread_id) and byte_size(thread_id) > 0 ->
+        %{state | paused_thread_ids: Map.put(state.paused_thread_ids, issue_id, thread_id)}
+
+      _ ->
+        state
+    end
+  end
+
+  defp maybe_remember_paused_thread(%State{} = state, _issue_id, _running_entry, _preserve_thread), do: state
+
+  defp remember_paused_issue(%State{} = state, issue_id) when is_binary(issue_id) do
+    %{state | paused_issue_ids: MapSet.put(state.paused_issue_ids, issue_id)}
+  end
+
+  defp maybe_forget_paused_issue(paused_issue_ids, issue_id, true) do
+    MapSet.delete(paused_issue_ids || MapSet.new(), issue_id)
+  end
+
+  defp maybe_forget_paused_issue(paused_issue_ids, _issue_id, _forget?) do
+    paused_issue_ids || MapSet.new()
+  end
+
+  defp maybe_forget_paused_thread(paused_thread_ids, issue_id, true) when is_map(paused_thread_ids) do
+    Map.delete(paused_thread_ids, issue_id)
+  end
+
+  defp maybe_forget_paused_thread(paused_thread_ids, _issue_id, _forget?) when is_map(paused_thread_ids) do
+    paused_thread_ids
   end
 
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do

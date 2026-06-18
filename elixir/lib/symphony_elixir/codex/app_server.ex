@@ -40,13 +40,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    thread_id = Keyword.get(opts, :thread_id)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, port} <- start_port(expanded_workspace, worker_host) do
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
-           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
+           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies, thread_id) do
         {:ok,
          %{
            port: port,
@@ -282,11 +283,27 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config.codex_runtime_settings(workspace, remote: true)
   end
 
-  defp do_start_session(port, workspace, session_policies) do
+  defp do_start_session(port, workspace, session_policies, thread_id) do
     case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies)
+      :ok -> start_or_resume_thread(port, workspace, session_policies, thread_id)
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp start_or_resume_thread(port, workspace, session_policies, thread_id)
+       when is_binary(thread_id) and byte_size(thread_id) > 0 do
+    case resume_thread(port, workspace, session_policies, thread_id) do
+      {:ok, resumed_thread_id} ->
+        {:ok, resumed_thread_id}
+
+      {:error, reason} ->
+        Logger.warning("Unable to resume Codex thread #{thread_id}: #{inspect(reason)}; starting a new thread")
+        start_thread(port, workspace, session_policies)
+    end
+  end
+
+  defp start_or_resume_thread(port, workspace, session_policies, _thread_id) do
+    start_thread(port, workspace, session_policies)
   end
 
   defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
@@ -305,6 +322,30 @@ defmodule SymphonyElixir.Codex.AppServer do
       {:ok, %{"thread" => thread_payload}} ->
         case thread_payload do
           %{"id" => thread_id} -> {:ok, thread_id}
+          _ -> {:error, {:invalid_thread_payload, thread_payload}}
+        end
+
+      other ->
+        other
+    end
+  end
+
+  defp resume_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}, thread_id) do
+    send_message(port, %{
+      "method" => "thread/resume",
+      "id" => @thread_start_id,
+      "params" => %{
+        "threadId" => thread_id,
+        "approvalPolicy" => approval_policy,
+        "sandbox" => thread_sandbox,
+        "cwd" => workspace
+      }
+    })
+
+    case await_response(port, @thread_start_id) do
+      {:ok, %{"thread" => thread_payload}} ->
+        case thread_payload do
+          %{"id" => resumed_thread_id} -> {:ok, resumed_thread_id}
           _ -> {:error, {:invalid_thread_payload, thread_payload}}
         end
 

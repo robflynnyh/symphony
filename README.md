@@ -1,8 +1,8 @@
 # Symphony
 
 > [!NOTE]
-> This fork adds opt-in per-issue Codex routing from Linear labels. When
-> `codex.issue_label_overrides` is enabled, labels such as `codex:model:gpt-5.5-pro`
+> This fork enables per-issue Codex routing from Linear labels by default. Unless
+> `codex.issue_label_overrides` is set to `false`, labels such as `codex:model:gpt-5.5-pro`
 > / `model:gpt-5.5-pro` and `codex:thinking:xhigh` / `thinking:xhigh` are passed to
 > Codex App Server as turn-level overrides.
 

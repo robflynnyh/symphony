@@ -322,10 +322,12 @@ defmodule SymphonyElixir.CoreTest do
             ref: nil,
             identifier: issue_identifier,
             issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
+            thread_id: "thread-terminal",
             started_at: DateTime.utc_now()
           }
         },
         claimed: MapSet.new([issue_id]),
+        paused_thread_ids: %{issue_id => "thread-terminal"},
         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
         retry_attempts: %{}
       }
@@ -343,7 +345,253 @@ defmodule SymphonyElixir.CoreTest do
 
       refute Map.has_key?(updated_state.running, issue_id)
       refute MapSet.member?(updated_state.claimed, issue_id)
+      refute Map.has_key?(updated_state.paused_thread_ids, issue_id)
       refute Process.alive?(agent_pid)
+      refute File.exists?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "non-active issue state stops running agent and preserves paused thread" do
+    issue_id = "issue-paused"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: "MT-PAUSE",
+          issue: %Issue{id: issue_id, state: "In Progress", identifier: "MT-PAUSE"},
+          thread_id: "thread-paused",
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PAUSE",
+      state: "Backlog",
+      title: "Paused experiment",
+      description: "Experiment still running",
+      labels: []
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Process.alive?(agent_pid)
+    assert MapSet.member?(updated_state.paused_issue_ids, issue_id)
+    assert updated_state.paused_thread_ids[issue_id] == "thread-paused"
+  end
+
+  test "non-active issue with thread-continuation disable label does not preserve paused thread" do
+    issue_id = "issue-paused-label-disabled"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: "MT-PAUSE-LABEL",
+          issue: %Issue{id: issue_id, state: "In Progress", identifier: "MT-PAUSE-LABEL"},
+          thread_id: "thread-paused-label",
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PAUSE-LABEL",
+      state: "Backlog",
+      title: "Paused experiment",
+      description: "Experiment still running",
+      labels: ["symphony:disable-thread-continuation"]
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Process.alive?(agent_pid)
+    assert MapSet.member?(updated_state.paused_issue_ids, issue_id)
+    refute Map.has_key?(updated_state.paused_thread_ids, issue_id)
+  end
+
+  test "global thread_continuation false does not preserve paused thread" do
+    write_workflow_file!(Workflow.workflow_file_path(), codex_thread_continuation: false)
+
+    issue_id = "issue-paused-config-disabled"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: "MT-PAUSE-CONFIG",
+          issue: %Issue{id: issue_id, state: "In Progress", identifier: "MT-PAUSE-CONFIG"},
+          thread_id: "thread-paused-config",
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PAUSE-CONFIG",
+      state: "Backlog",
+      title: "Paused experiment",
+      description: "Experiment still running",
+      labels: []
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Process.alive?(agent_pid)
+    assert MapSet.member?(updated_state.paused_issue_ids, issue_id)
+    refute Map.has_key?(updated_state.paused_thread_ids, issue_id)
+  end
+
+  test "thread-continuation disable label ignores previously saved paused thread" do
+    issue_id = "issue-paused-label-return"
+
+    state = %Orchestrator.State{
+      paused_thread_ids: %{issue_id => "thread-paused-return"},
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PAUSE-RETURN",
+      state: "Todo",
+      title: "Resume paused work",
+      description: "Should use old approach",
+      labels: ["symphony:disable_thread_continuation"]
+    }
+
+    assert {nil, nil} = Orchestrator.resume_thread_context_for_test(state, issue)
+  end
+
+  test "terminal paused issue state cleans workspace and forgets paused thread" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-paused-terminal-reconcile-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-paused-terminal"
+    issue_identifier = "MT-PAUSED-DONE"
+    workspace = Path.join(test_root, issue_identifier)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+      )
+
+      File.mkdir_p!(workspace)
+
+      state = %Orchestrator.State{
+        paused_issue_ids: MapSet.new([issue_id]),
+        paused_thread_ids: %{issue_id => "thread-paused-terminal"},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "Done",
+        title: "Completed paused issue",
+        description: "Should clean workspace",
+        labels: []
+      }
+
+      updated_state = Orchestrator.reconcile_paused_issue_states_for_test([issue], state)
+
+      refute MapSet.member?(updated_state.paused_issue_ids, issue_id)
+      refute Map.has_key?(updated_state.paused_thread_ids, issue_id)
+      refute File.exists?(workspace)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "terminal paused issue with disabled thread continuation cleans workspace" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-paused-disabled-terminal-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-paused-disabled-terminal"
+    issue_identifier = "MT-PAUSED-DISABLED-DONE"
+    workspace = Path.join(test_root, issue_identifier)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+      )
+
+      File.mkdir_p!(workspace)
+
+      state = %Orchestrator.State{
+        paused_issue_ids: MapSet.new([issue_id]),
+        paused_thread_ids: %{},
+        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        retry_attempts: %{}
+      }
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "Done",
+        title: "Completed disabled continuation issue",
+        description: "Should clean workspace even without a paused thread id",
+        labels: ["symphony:disable_thread_continuation"]
+      }
+
+      updated_state = Orchestrator.reconcile_paused_issue_states_for_test([issue], state)
+
+      refute MapSet.member?(updated_state.paused_issue_ids, issue_id)
+      refute Map.has_key?(updated_state.paused_thread_ids, issue_id)
       refute File.exists?(workspace)
     after
       File.rm_rf(test_root)
@@ -514,6 +762,130 @@ defmodule SymphonyElixir.CoreTest do
     refute Process.alive?(agent_pid)
   end
 
+  test "reconcile stops running issue when a required label is removed" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
+
+    issue_id = "issue-unlabeled"
+
+    agent_pid =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    state = %Orchestrator.State{
+      running: %{
+        issue_id => %{
+          pid: agent_pid,
+          ref: nil,
+          identifier: "MT-562",
+          issue: %Issue{
+            id: issue_id,
+            identifier: "MT-562",
+            state: "In Progress",
+            labels: ["symphony"]
+          },
+          started_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-562",
+      state: "In Progress",
+      title: "Opted out active issue",
+      labels: []
+    }
+
+    updated_state = Orchestrator.reconcile_issue_states_for_test([issue], state)
+
+    refute Map.has_key?(updated_state.running, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Process.alive?(agent_pid)
+  end
+
+  test "reconcile releases a blocked issue when a required label is removed" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
+
+    issue_id = "blocked-unlabeled"
+
+    state = %Orchestrator.State{
+      blocked: %{
+        issue_id => %{
+          identifier: "MT-564",
+          error: "operator input required",
+          worker_host: nil
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-564",
+      title: "Blocked but opted out",
+      state: "In Progress",
+      labels: []
+    }
+
+    updated_state = Orchestrator.reconcile_blocked_issue_states_for_test([issue], state)
+
+    refute Map.has_key?(updated_state.blocked, issue_id)
+    refute MapSet.member?(updated_state.claimed, issue_id)
+  end
+
+  test "retry releases its claim when a required label is removed" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
+
+    issue_id = "retry-unlabeled"
+
+    state = %Orchestrator.State{
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-565",
+      title: "Retry opted out",
+      state: "In Progress",
+      labels: []
+    }
+
+    updated_state =
+      Orchestrator.handle_retry_issue_lookup_for_test(issue, state, issue_id, 1, %{
+        identifier: issue.identifier,
+        error: "agent exited"
+      })
+
+    refute MapSet.member?(updated_state.claimed, issue_id)
+    refute Map.has_key?(updated_state.retry_attempts, issue_id)
+  end
+
+  test "agent runner does not continue after a required label is removed" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
+
+    issue = %Issue{
+      id: "issue-label-continuation",
+      identifier: "MT-563",
+      title: "Stop after opt-out",
+      state: "In Progress",
+      labels: ["symphony"]
+    }
+
+    refreshed_issue = %{issue | labels: []}
+    fetcher = fn ["issue-label-continuation"] -> {:ok, [refreshed_issue]} end
+
+    assert {:done, ^refreshed_issue} =
+             AgentRunner.continue_with_issue_for_test(issue, fetcher)
+  end
+
   test "normal worker exit schedules active-state continuation retry" do
     issue_id = "issue-resume"
     ref = make_ref()
@@ -533,6 +905,7 @@ defmodule SymphonyElixir.CoreTest do
       ref: ref,
       identifier: "MT-558",
       issue: %Issue{id: issue_id, identifier: "MT-558", state: "In Progress"},
+      thread_id: "thread-resume",
       started_at: DateTime.utc_now()
     }
 
@@ -549,7 +922,10 @@ defmodule SymphonyElixir.CoreTest do
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
-    assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
+
+    assert %{attempt: 1, due_at_ms: due_at_ms} = retry_entry = state.retry_attempts[issue_id]
+
+    refute Map.has_key?(retry_entry, :thread_id)
     assert is_integer(due_at_ms)
     assert_due_in_range(due_at_ms, 500, 1_100)
   end
@@ -1359,6 +1735,115 @@ defmodule SymphonyElixir.CoreTest do
       refute Enum.at(turn_texts, 1) =~ "You are an agent for this repository."
       assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
       assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner resumes paused thread with reactivation guidance" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-reactivation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-paused"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-reactivated"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-reactivated",
+        identifier: "MT-249",
+        title: "Resume paused work",
+        description: "Original prompt should not be resent",
+        state: "Todo",
+        url: "https://example.org/issues/MT-249",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, nil,
+                 thread_id: "thread-paused",
+                 resume_kind: :reactivation,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      lines = File.read!(trace_file) |> String.split("\n", trim: true)
+
+      payloads =
+        lines
+        |> Enum.filter(&String.starts_with?(&1, "JSON:"))
+        |> Enum.map(&String.trim_leading(&1, "JSON:"))
+        |> Enum.map(&Jason.decode!/1)
+
+      assert Enum.any?(payloads, fn payload ->
+               payload["method"] == "thread/resume" &&
+                 get_in(payload, ["params", "threadId"]) == "thread-paused"
+             end)
+
+      refute Enum.any?(payloads, &(&1["method"] == "thread/start"))
+
+      [turn_payload] = Enum.filter(payloads, &(&1["method"] == "turn/start"))
+
+      turn_text =
+        turn_payload
+        |> get_in(["params", "input"])
+        |> Enum.map_join("\n", &Map.get(&1, "text", ""))
+
+      assert turn_text =~ "Reactivation guidance:"
+      assert turn_text =~ "newest Linear comments"
+      refute turn_text =~ "You are an agent for this repository."
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)
