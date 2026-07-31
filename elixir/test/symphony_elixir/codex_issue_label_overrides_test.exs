@@ -24,6 +24,16 @@ defmodule SymphonyElixir.CodexIssueLabelOverridesTest do
     assert IssueLabelOverrides.turn_params(issue, true) == %{"effort" => "high"}
   end
 
+  test "accepts max and ultra thinking efforts" do
+    assert IssueLabelOverrides.turn_params(%Issue{labels: ["codex:thinking:max"]}, true) == %{
+             "effort" => "max"
+           }
+
+    assert IssueLabelOverrides.turn_params(%Issue{labels: ["thinking:ultra"]}, true) == %{
+             "effort" => "ultra"
+           }
+  end
+
   test "extracts short Linear label forms" do
     issue = %Issue{labels: ["model:gpt-5.5", "thinking:low"]}
 

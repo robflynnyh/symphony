@@ -602,7 +602,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `codex.stall_timeout_ms`: integer, default `300000`
 - `codex.issue_label_overrides`: boolean, default `true`; when enabled, Linear labels may set
   Codex turn-level `model` and reasoning `effort` overrides using either `codex:`-prefixed labels
-  or short labels such as `model:gpt-5.5` and `thinking:low`.
+  or short labels such as `model:gpt-5.5` and `thinking:low`. Supported effort values are
+  `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, and `ultra`.
 - `codex.thread_continuation`: boolean, default `true`; when enabled, non-active pause/reactivation
   flows may resume the last known coding-agent thread. When disabled, reactivation uses the old
   fresh-thread behavior.
@@ -958,7 +959,8 @@ Notes:
 - Unless `codex.issue_label_overrides` is disabled, per-issue Linear labels may additionally supply
   turn-level `model` and `effort` fields. The user-facing thinking label maps to Codex App Server's
   `effort` field. Supported label prefixes are `codex:model:`, `model:`, `codex:thinking:`,
-  `thinking:`, `codex:effort:`, and `effort:`.
+  `thinking:`, `codex:effort:`, and `effort:`. Supported effort values are `minimal`, `low`,
+  `medium`, `high`, `xhigh`, `max`, and `ultra`.
 
 RECOMMENDED additional process settings:
 

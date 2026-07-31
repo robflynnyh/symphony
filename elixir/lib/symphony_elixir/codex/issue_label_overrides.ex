@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Codex.IssueLabelOverrides do
 
   alias SymphonyElixir.Linear.Issue
 
-  @effort_values ~w(minimal low medium high xhigh)
+  @effort_values ~w(minimal low medium high xhigh max ultra)
   @model_prefixes ["codex:model:", "model:"]
   @effort_prefixes ["codex:effort:", "effort:"]
   @thinking_prefixes ["codex:thinking:", "thinking:"]

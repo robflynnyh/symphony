@@ -4,9 +4,10 @@
 > This fork enables per-issue Codex routing from Linear labels by default: unless
 > `codex.issue_label_overrides` is set to `false`, labels such as
 > `codex:model:gpt-5.5-pro` / `model:gpt-5.5-pro` and
-> `codex:thinking:xhigh` / `thinking:xhigh` are passed to Codex App Server as
-> turn-level overrides. It also resumes paused Codex threads by default when a
-> Linear issue returns to an active state from a non-active state such as
+> `codex:thinking:xhigh` / `thinking:xhigh`, `codex:thinking:max` /
+> `thinking:max`, and `codex:thinking:ultra` / `thinking:ultra` are passed to
+> Codex App Server as turn-level overrides. It also resumes paused Codex threads
+> by default when a Linear issue returns to an active state from a non-active state such as
 > `Backlog` or `In Review`. Set `codex.thread_continuation: false` globally, or
 > add `symphony:disable_thread_continuation` / `symphony:disable-thread-continuation`
 > to a single issue, to restore the old fresh-thread behavior. Moving an issue
